@@ -1,0 +1,18 @@
+Package: CanineMammaryTumor
+Title: Analysis of Canine RNA-Seq data
+Version: 0.1
+Authors@R: as.person(c(
+    "Dmitriy Gorenshteyn <dmitriyg@princeton.edu> [aut, cre]",
+    "David Robinson <dgrtwo@princeton.edu> [aut]"
+    ))
+Description: Analysis of Canine RNA-Seq data, as an R package
+Depends:
+    R (>= 3.1.0)
+License: MIT + License
+LazyData: true
+URL: http://github.com/dimagor/CanSeq
+VignetteBuilder: knitr
+BugReports: http://github.com/dimagor/CanSeq/issues
+Suggests:
+    knitr,
+    dplyr

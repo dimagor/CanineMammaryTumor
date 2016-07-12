@@ -1,0 +1,181 @@
+---
+title: "Preparing Expression Profiles"
+author: "Dmitriy Gorenshteyn, David Robinson"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{canseq_prep}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE,
+                      prompt = FALSE)
+```
+
+
+```{r lib, echo=FALSE}
+library(knitr)
+library(plyr)
+library(dplyr)
+library(broom)
+library(biobroom)
+library(tidyr)
+library(qvalue)
+library(edgeR)
+library(biomaRt,pos = "package:base")
+```
+
+# Prepare Data & Identify Differentially Expressed Genes
+
+```{r get_sample_info}
+samplesCanine <- read.csv('original_data/samples_canine.csv')
+devtools::use_data(samplesCanine)
+```
+
+## Read in Count Data
+
+```{r prepare_edger}
+counts <- readDGE(samplesCanine$File, "original_data/count_data/", header = FALSE)
+minCount <- round((nrow(samplesCanine)/length(levels(samplesCanine$Hist))), 0)
+cpms <- cpm(counts)
+noint <- rownames(counts) %in% c("no_feature","ambiguous","too_low_aQual","not_aligned","alignment_not_unique")
+counts_filtered <- counts[rowSums(cpms > 1) >= minCount & !noint,]
+
+samplesCanine$Hist <- relevel(samplesCanine$Hist,"N")
+samplesCanine <- samplesCanine %>% mutate(Patient = factor(PatientNumber))
+```
+
+## Estimate Dispersion
+
+```{r edgeR_disp}
+design <- model.matrix( ~Patient+Hist, samplesCanine)
+d <- DGEList(counts = counts_filtered, group = samplesCanine$Hist)
+d <- calcNormFactors(d)
+d <- estimateGLMTrendedDisp(d, design)
+d <- estimateGLMTagwiseDisp(d, design)
+```
+
+## Perform DE Analysis
+
+```{r edgeR_glm}
+d_fit <- glmFit(d,design)
+
+lrt_list <- list(
+    b_n = glmLRT(d_fit,coef = "HistB"),
+    m_n = glmLRT(d_fit,coef = "HistM"),
+    m_b = glmLRT(d_fit,contrast = makeContrasts(HistM-HistB, levels = d_fit$design)),
+    n_b_m = glmLRT(d_fit,coef = c("HistM", "HistB"))
+    )
+
+tidy.DGELRT <- function(x, ...) {
+  ret <- fix_data_frame(x$table, newcol = "gene")
+}
+
+LRTtidied <- ldply(lrt_list, tidy,.id = "contrast") %>% 
+  group_by(contrast) %>% 
+  mutate(qval = qvalue(PValue)$qvalues)
+
+devtools::use_data(LRTtidied)
+```
+
+## Store the CPMs
+
+```{r buildCPM}
+getCPMWithoutPatient <- function(DGEFit) {
+  cpm = cpm(DGEFit$counts,normalized.lib.sizes = TRUE, log = FALSE)
+  cpm = cpm + .25 #Add prior
+  logcpm = log(cpm)
+  patient.cols = grep("Patient", colnames(DGEFit$coefficients))
+  due.to.patient = DGEFit$coefficients[, patient.cols] %*% t(DGEFit$design[, patient.cols])
+  without.patient = logcpm - due.to.patient
+  without.patient = log(exp(without.patient), base = 2) #To make comparable to cpm()
+  return(without.patient)
+}
+CPMmatrices <- list(
+  raw = cpm(d_fit$counts, normalized.lib.sizes = FALSE, log = FALSE),
+  norm = cpm(d_fit$counts, normalized.lib.sizes = TRUE, log = FALSE),
+  znorm = t(scale(t(cpm(d_fit$counts, normalized.lib.sizes = TRUE, log = FALSE)),center = TRUE, scale = TRUE)),
+  patregressed = getCPMWithoutPatient(d_fit),
+  zpatregressed = t(scale(t(getCPMWithoutPatient(d_fit)),center = TRUE,scale = TRUE))
+  )
+devtools::use_data(CPMmatrices)
+```
+
+# Prepare Mappings to Human Data
+```{r human_mapping}
+allgenes <- LRTtidied %>% ungroup %>% select(gene) %>% distinct %>% .$gene
+Map_CanEns2Info <-  getBM(attributes = c('ensembl_gene_id','external_gene_name','description'),
+                          filters = list(ensembl_gene_id = allgenes),
+                          mart = useMart("ensembl",dataset = "cfamiliaris_gene_ensembl"))
+Map_CanEns2HumEns <- getBM(attributes = c('ensembl_gene_id','hsapiens_homolog_ensembl_gene'),
+                           filters = list(ensembl_gene_id = allgenes,with_homolog_hsap = TRUE),
+                           mart = useMart("ensembl",dataset = "cfamiliaris_gene_ensembl"))
+Map_HumEns2Entrez <- getBM(attributes = c('ensembl_gene_id','entrezgene'),
+                           filters = 'ensembl_gene_id',
+                           values = Map_CanEns2HumEns$hsapiens_homolog_ensembl_gene,
+                           mart = useMart("ensembl",dataset = "hsapiens_gene_ensembl"))
+Map_HumEns2Symb <- getBM(attributes = c('ensembl_gene_id','external_gene_name'),
+                         filters = 'ensembl_gene_id',
+                         values = Map_CanEns2HumEns$hsapiens_homolog_ensembl_gene,
+                         mart = useMart("ensembl",dataset = "hsapiens_gene_ensembl"))
+
+Map_CanEns2HumEnt <- inner_join(Map_CanEns2HumEns,
+                                Map_HumEns2Entrez,
+                                by = c("hsapiens_homolog_ensembl_gene" = "ensembl_gene_id"))
+Map_CanEns2HumEnt_unique <- Map_CanEns2HumEnt %>% 
+  select(Can_Ens = ensembl_gene_id, Hum_Ent = entrezgene) %>% distinct %>% 
+  group_by(Can_Ens) %>% 
+  filter(length(Can_Ens) == 1) %>% 
+  group_by(Hum_Ent) %>% 
+  filter(length(Hum_Ent) == 1) %>%
+  ungroup %>% mutate(Hum_Ent = as.character(Hum_Ent))
+
+Map_CanEns2HumSymb <- inner_join(Map_CanEns2HumEns,
+                                 Map_HumEns2Symb,
+                                 by = c("hsapiens_homolog_ensembl_gene" = "ensembl_gene_id"))
+Map_CanEns2HumSymb_unique <- Map_CanEns2HumSymb %>% 
+  select(Can_Ens = ensembl_gene_id,Hum_Symb = external_gene_name) %>% distinct %>% 
+  group_by(Can_Ens) %>% 
+  filter(length(Can_Ens) == 1) %>% 
+  group_by(Hum_Symb) %>% 
+  filter(length(Hum_Symb) == 1)
+
+save(Map_CanEns2HumEns, 
+     Map_CanEns2Info, 
+     Map_CanEns2HumEnt, 
+     Map_CanEns2HumEnt_unique, 
+     Map_CanEns2HumSymb, 
+     Map_CanEns2HumSymb_unique,file="data/humanmapping.rda")
+```
+
+# Prepare Profile Metrics 
+```{r profile_metrics}
+profileMetrics <- LRTtidied %>% 
+  filter(contrast!="n_b_m") %>% 
+  select(contrast, gene, logFC, PValue, qval) %>% 
+    gather(type, value, -contrast, -gene) %>%
+    unite(contrast_type, contrast, type, sep=".") %>%
+    spread(contrast_type, value) %>% 
+    mutate(norm_sp.maxq = pmax(b_n.qval, m_n.qval, sign(b_n.logFC) != sign(m_n.logFC)),
+           benign_sp.maxq = pmax(b_n.qval, m_b.qval, sign(b_n.logFC) == sign(m_b.logFC)),
+           malign_sp.maxq = pmax(m_b.qval, m_n.qval, sign(m_b.logFC) != sign(m_n.logFC)),
+           progressive.maxq = pmax(b_n.qval, m_b.qval, sign(b_n.logFC) != sign(m_b.logFC)),
+           norm_sp.avgeffect =   (b_n.logFC + m_n.logFC) / 2,
+           benign_sp.avgeffect = (b_n.logFC - m_b.logFC) / 2,
+           malign_sp.avgeffect = (m_n.logFC + m_b.logFC) / 2,
+           progressive.avgeffect = m_n.logFC) %>% 
+  select(-b_n.logFC:-m_n.qval) %>%
+  gather(profile_metric, value, -gene) %>%
+  separate(profile_metric, c("profile", "metric"), sep = "\\.") %>%
+  spread(metric, value) %>%
+  left_join(Map_CanEns2HumEnt_unique,by=c("gene"="Can_Ens")) %>% 
+  left_join(Map_CanEns2HumSymb_unique,by=c("gene"="Can_Ens")) %>%
+  mutate(Hum_Symb=ifelse(is.na(Hum_Symb),gene,Hum_Symb), 
+         Hum_Ent=ifelse(is.na(Hum_Ent),gene,Hum_Ent))
+
+save(profileMetrics,file="data/profileMetrics.rda")
+```
+

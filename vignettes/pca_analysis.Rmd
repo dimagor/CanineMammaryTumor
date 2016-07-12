@@ -1,0 +1,110 @@
+---
+title: "PCA Analysis"
+author: "Dmitriy Gorenshteyn, David Robinson"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{pca_analysis}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\usepackage[utf8]{inputenc}
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+               message = FALSE,
+               prompt = FALSE,
+               warning = FALSE)
+```
+
+```{r lib}
+library(dplyr)
+library(broom)
+library(tidyr)
+library(ggplot2)
+library(CanineMammaryTumor)
+```
+
+
+```{r run_svd}
+data(profileMetrics)
+data(CPMmatrices)
+
+tidy_svd <- function(x, mode = "u", ...) {
+    if (mode == "u") {
+        # change into a format with three columns:
+        # row, column, loading
+        ret <- as.data.frame(x$u) %>% mutate(row = seq_len(nrow(x$u))) %>%
+            gather(column, loading, -row) %>%
+            mutate(column = as.numeric(column))
+        ret
+    } else if (mode == "d") {
+        # return as a data.frame
+        data.frame(PC = seq_along(x$d), d = x$d, percent = x$d^2 / sum(x$d^2))
+    } else if (mode == "v") {
+        ret <- as.data.frame(x$v) %>% mutate(column = seq_len(nrow(x$v))) %>%
+            gather(PC, value, -column) %>%
+            mutate(PC = as.numeric(PC))
+        ret
+    }
+}
+
+s <- svd(CPMmatrices$patregressed - rowMeans(CPMmatrices$patregressed))
+U <- tbl_df(tidy_svd(s, "u"))
+D <- tidy_svd(s, "d")
+V <- tidy_svd(s, "v") %>%
+    mutate(Hist = samplesCanine$Hist[column],
+           PatientNumber = samplesCanine$PatientNumber[column],
+           LibPrep = samplesCanine$LibPrep[column],
+           SeqRun = samplesCanine$SeqRun[column],
+           Qlabel = samplesCanine$Qlabel[column]) %>% tbl_df() %>%
+    inner_join(D, by = "PC") %>%
+    mutate(PC_title = paste0("PC", PC, " (", round(percent * 100, 1), "%)")) %>%
+    mutate(PC_title = factor(PC_title, unique(PC_title))) %>%
+    mutate(Hist = factor(Hist, c("N", "B", "M")))
+
+V_anovas <- V %>% group_by(PC, PC_title) %>%
+    do(tidy(aov(value ~ Hist, .))) %>%
+    filter(PC <= 5) %>%
+    filter(!is.na(p.value)) %>% ungroup() %>%
+    mutate(p.adjusted = p.adjust(p.value),
+           p.value = format.pval(p.value, digits = 2 )) %>%
+    mutate(pval.formatted = paste0("ANOVA pval: ",format.pval(p.adjusted,digits = 2)))
+```
+
+
+```{r figure_1b}
+V %>% filter(PC %in% c(1,2,3)) %>%
+    inner_join(V_anovas, by = "PC") %>% 
+    mutate(PC_title_p = paste0(PC_title.x,"\np<", format.pval(p.adjusted, digits = 2))) %>% 
+    ggplot(aes(Hist, value)) +
+    geom_boxplot(aes(fill = Hist), width = .7) + facet_wrap(~ PC_title_p, scale = "free", ncol = 3) +
+    theme_classic() +
+    theme(text = element_text(size=20),
+          panel.grid.major.x = element_blank(),
+          legend.position = "none",
+          strip.background = element_rect(color = "white")) +
+    scale_fill_manual(name = "Histology",
+                      values=c("green", "#5585ff", "red"),
+                      breaks=c("N", "B", "M"),
+                      labels=c("Normal", "Benign", "Malignant")) +
+    scale_x_discrete(breaks=c("N", "B", "M"),
+                      labels=c("Normal", "Adenoma", "Carcinoma")) +
+    xlab("") + ylab("PC Value")
+```
+
+```{r supplemental_fig_1}
+D %>% mutate(selected = ifelse(percent >= 0.05, TRUE, FALSE)) %>%
+    ggplot(aes(PC, percent*100, fill = selected)) +
+    geom_bar(stat = "identity") +
+    geom_hline(yintercept = 5, color = "red", linetype = "dashed") +
+    ylab("% Variance Explained") +
+    scale_x_discrete(limits = c(0, 25, 50, 75)) +
+    scale_y_discrete(limits = c(0, 5, 10, 15)) +
+    scale_fill_manual(name = "",
+                      breaks=c(TRUE, FALSE),
+                      values = c("black","red")) +
+    theme_classic() +
+    theme(legend.position="none", 
+          text = element_text(size=20))
+```
+
