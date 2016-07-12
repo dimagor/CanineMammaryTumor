@@ -10,9 +10,9 @@ Depends:
     R (>= 3.1.0)
 License: MIT + License
 LazyData: true
-URL: http://github.com/dimagor/CanSeq
+URL: http://github.com/dimagor/CanineMammaryTumor
 VignetteBuilder: knitr
-BugReports: http://github.com/dimagor/CanSeq/issues
+BugReports: http://github.com/dimagor/CanineMammaryTumor/issues
 Suggests:
     knitr,
     dplyr
